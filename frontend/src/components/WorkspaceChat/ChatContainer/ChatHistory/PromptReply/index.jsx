@@ -1,17 +1,27 @@
-import { memo } from "react";
+import { memo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Warning } from "@phosphor-icons/react";
 import renderMarkdown from "@/utils/chat/markdown";
 import DOMPurify from "@/utils/chat/purify";
 import Citations from "../Citation";
+import ClaimVerification from "../ClaimVerification";
 import {
   THOUGHT_REGEX_CLOSE,
   THOUGHT_REGEX_COMPLETE,
   THOUGHT_REGEX_OPEN,
 } from "../ThoughtContainer";
 
-const PromptReply = ({ uuid, reply, pending, error, sources = [] }) => {
+const PromptReply = ({
+  uuid,
+  reply,
+  pending,
+  error,
+  sources = [],
+  closed = false,
+  verification = null,
+}) => {
   const { t } = useTranslation();
+  const answerContentRef = useRef(null);
   if (!reply && sources.length === 0 && !pending && !error) return null;
 
   if (pending) {
@@ -66,11 +76,20 @@ const PromptReply = ({ uuid, reply, pending, error, sources = [] }) => {
   return (
     <div key={uuid} className="flex justify-start w-full">
       <div className="py-4 pl-0 pr-4 flex flex-col w-full">
-        <RenderAssistantChatContent
-          key={`${uuid}-prompt-reply-content`}
-          message={reply}
-        />
+        <div ref={answerContentRef} data-testid="assistant-answer-content">
+          <RenderAssistantChatContent
+            key={`${uuid}-prompt-reply-content`}
+            message={reply}
+          />
+        </div>
         <Citations sources={sources} />
+        {closed && (
+          <ClaimVerification
+            verification={verification}
+            messageSources={sources}
+            answerRootRef={answerContentRef}
+          />
+        )}
       </div>
     </div>
   );

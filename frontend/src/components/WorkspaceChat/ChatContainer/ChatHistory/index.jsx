@@ -337,6 +337,7 @@ function buildMessages({
             sources={props.sources}
             error={props.error}
             closed={props.closed}
+            verification={props.verification}
           />
         );
       } else {
@@ -359,6 +360,7 @@ function buildMessages({
             metrics={props.metrics}
             outputs={props.outputs}
             clarifyingQuestions={props.clarifyingQuestions}
+            verification={props.verification}
           />
         );
       }

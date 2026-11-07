@@ -3,6 +3,7 @@ import { Info, Warning } from "@phosphor-icons/react";
 import Actions from "./Actions";
 import renderMarkdown from "@/utils/chat/markdown";
 import Citations from "../Citation";
+import ClaimVerification from "../ClaimVerification";
 import { v4 } from "uuid";
 import DOMPurify from "@/utils/chat/purify";
 import { EditMessageForm, useEditMessage } from "./Actions/EditMessage";
@@ -52,11 +53,13 @@ const HistoricalMessage = ({
   metrics = {},
   outputs = [],
   clarifyingQuestions = [],
+  verification = null,
 }) => {
   // Freeze uuid on first render. User messages arrive without a uuid and this value
   // is used as the wrapper div's `key` — a default param fallback would regenerate
   // on every render and remount the subtree, wiping TruncatableContent state.
   const [uuid] = useState(() => uuidProp ?? v4());
+  const answerContentRef = useRef(null);
   const { t } = useTranslation();
   const { isEditing } = useEditMessage({ chatId, role });
   const { isDeleted, completeDelete, onEndAnimation } = useWatchDeleteMessage({
@@ -175,7 +178,12 @@ const HistoricalMessage = ({
                 <p className="!m-0">{t("chat.no_response")}</p>
               </div>
             ) : (
-              <RenderChatContent role={role} message={message} />
+              <div
+                ref={answerContentRef}
+                data-testid="assistant-answer-content"
+              >
+                <RenderChatContent role={role} message={message} />
+              </div>
             )}
             {isRefusalMessage && (
               <Link
@@ -225,6 +233,13 @@ const HistoricalMessage = ({
           </div>
         )}
         {role === "assistant" && <Citations sources={sources} />}
+        {role === "assistant" && !isEditing && (
+          <ClaimVerification
+            verification={verification}
+            messageSources={sources}
+            answerRootRef={answerContentRef}
+          />
+        )}
       </div>
     </div>
   );
@@ -246,7 +261,9 @@ export default memo(
       JSON.stringify(prevProps.metrics) === JSON.stringify(nextProps.metrics) &&
       JSON.stringify(prevProps.sources) === JSON.stringify(nextProps.sources) &&
       JSON.stringify(prevProps.clarifyingQuestions) ===
-        JSON.stringify(nextProps.clarifyingQuestions)
+        JSON.stringify(nextProps.clarifyingQuestions) &&
+      JSON.stringify(prevProps.verification) ===
+        JSON.stringify(nextProps.verification)
     );
   }
 );

@@ -7,12 +7,16 @@ const { addChatCostToMetrics } = require("../helpers/modelPricing");
 const { writeResponseChunk } = require("../helpers/chat/responses");
 const { abortConnectorOnClientDisconnect } = require("../helpers/abortSignals");
 const { grepAgents } = require("./agents");
+const answerVerification = require("./answerVerification");
+const {
+  collectPinnedDocIdentifiers,
+  buildAndDeriveEvidence,
+} = require("./evidence");
 const {
   grepCommand,
   VALID_COMMANDS,
   chatPrompt,
   recentChatHistory,
-  sourceIdentifier,
 } = require("./index");
 const {
   resolveReasoningEffort,
@@ -142,9 +146,6 @@ async function streamChatWithWorkspace(
   // 2. Chatting in "query" mode and has at least 1 embedding
   let completeText;
   let metrics = {};
-  let contextTexts = [];
-  let sources = [];
-  let pinnedDocIdentifiers = [];
 
   // If the router pre-fetched context we can reuse it; otherwise fetch fresh.
   const {
@@ -162,16 +163,7 @@ async function streamChatWithWorkspace(
       workspace,
       maxTokens: LLMConnector.promptWindowLimit(),
     }).pinnedDocs());
-  pinnedDocs.forEach((doc) => {
-    const { pageContent, ...metadata } = doc;
-    pinnedDocIdentifiers.push(sourceIdentifier(doc));
-    contextTexts.push(doc.pageContent);
-    sources.push({
-      text:
-        pageContent.slice(0, 1_000) + "...continued on in source document...",
-      ...metadata,
-    });
-  });
+  const pinnedDocIdentifiers = collectPinnedDocIdentifiers(pinnedDocs);
 
   // Parsed files — reuse pre-fetched if available, otherwise fetch fresh.
   const parsedFiles =
@@ -181,15 +173,6 @@ async function streamChatWithWorkspace(
       thread || null,
       user || null
     ));
-  parsedFiles.forEach((doc) => {
-    const { pageContent, ...metadata } = doc;
-    contextTexts.push(doc.pageContent);
-    sources.push({
-      text:
-        pageContent.slice(0, 1_000) + "...continued on in source document...",
-      ...metadata,
-    });
-  });
 
   const vectorSearchResults =
     embeddingsCount !== 0
@@ -236,8 +219,12 @@ async function streamChatWithWorkspace(
   // If a past citation was used to answer the question - that is visible in the history so it logically makes sense
   // and does not appear to the user that a new response used information that is otherwise irrelevant for a given prompt.
   // TLDR; reduces GitHub issues for "LLM citing document that has no answer in it" while keep answers highly accurate.
-  contextTexts = [...contextTexts, ...filledSources.contextTexts];
-  sources = [...sources, ...vectorSearchResults.sources];
+  const { evidenceItems, contextTexts, sources } = buildAndDeriveEvidence({
+    pinnedDocs,
+    parsedDocuments: parsedFiles,
+    retrievalSources: vectorSearchResults.sources,
+    filledSources,
+  });
 
   // If in query mode and no context chunks are found from search, backfill, or pins -  do not
   // let the LLM try to hallucinate a response or use general knowledge and exit early
@@ -349,6 +336,19 @@ async function streamChatWithWorkspace(
   }
 
   if (completeText?.length > 0) {
+    const verification =
+      process.env.RAG_ANSWER_VERIFICATION_ENABLED === "true"
+        ? await answerVerification.runChatAnswerVerification({
+            connector: LLMConnector,
+            question: message,
+            answer: completeText,
+            contextTexts,
+            evidenceItems,
+            generationMessages: messages,
+            systemPrompt,
+          })
+        : undefined;
+
     const completedChat = {
       workspaceId: workspace.id,
       prompt: message,
@@ -358,6 +358,7 @@ async function streamChatWithWorkspace(
         type: chatMode,
         attachments,
         metrics,
+        ...(verification ? { verification } : {}),
       },
       threadId: thread?.id || null,
       user,
@@ -375,6 +376,7 @@ async function streamChatWithWorkspace(
       error: false,
       chatId: savedChat?.id,
       metrics,
+      ...(verification ? { verification } : {}),
     });
     return;
   }

@@ -25,6 +25,7 @@ export default function handleChat(
     metrics = {},
     routedTo = null,
     outputs = null,
+    verification = null,
   } = chatResult;
 
   if (type === "modelRouteNotification") {
@@ -113,6 +114,7 @@ export default function handleChat(
         chatId,
         metrics,
         ...(outputs ? { outputs } : {}),
+        ...(verification ? { verification } : {}),
       },
     ]);
     _chatHistory.push({
@@ -127,6 +129,7 @@ export default function handleChat(
       chatId,
       metrics,
       ...(outputs ? { outputs } : {}),
+      ...(verification ? { verification } : {}),
     });
     emitAssistantMessageCompleteEvent(chatId);
   } else if (
@@ -148,6 +151,7 @@ export default function handleChat(
           pending: false,
           chatId,
           metrics,
+          ...(verification ? { verification } : {}),
         };
 
         _chatHistory[chatIdx - 1] = { ..._chatHistory[chatIdx - 1], chatId }; // update prompt with chatID
@@ -165,6 +169,7 @@ export default function handleChat(
           pending: false,
           chatId,
           metrics,
+          ...(close && verification ? { verification } : {}),
         };
       }
       _chatHistory[chatIdx] = updatedHistory;
@@ -173,14 +178,21 @@ export default function handleChat(
         uuid,
         sources,
         error,
-        content: textResponse,
+        content: textResponse || "",
         role: "assistant",
         closed: close,
         animate: !close,
         pending: false,
         chatId,
         metrics,
+        ...((close || type === "finalizeResponseStream") && verification
+          ? { verification }
+          : {}),
       });
+      if (type === "finalizeResponseStream") {
+        emitAssistantMessageCompleteEvent(chatId);
+        setLoadingResponse(false);
+      }
     }
     setChatHistory([..._chatHistory]);
   } else if (type === "agentInitWebsocketConnection") {

@@ -18,6 +18,10 @@ import OutlookLogo from "@/pages/Admin/Agents/OutlookSkillPanel/outlook.png";
 import { toPercentString } from "@/utils/numbers";
 import { useTranslation } from "react-i18next";
 import { useSourcesSidebar } from "../../ChatSidebar";
+import {
+  sanitizeHttpUrl,
+  sliceTextForHighlight,
+} from "../ClaimVerification/utils";
 
 const CIRCLE_ICONS = {
   file: FileText,
@@ -190,72 +194,153 @@ export default function Citations({ sources = [] }) {
   );
 }
 
-export function omitChunkHeader(text) {
+export function omitChunkHeader(text = "") {
+  if (typeof text !== "string") return "";
   if (!text.includes("<document_metadata>")) return text;
   return text.split("</document_metadata>")[1].trim();
 }
 
-export function CitationDetailModal({ source, onClose }) {
-  const { references, title, chunks } = source;
-  const { isUrl, text: webpageUrl, href: linkTo } = parseChunkSource(source);
+export function CitationDetailModal({
+  source,
+  onClose,
+  highlightQuote = null,
+}) {
   const { t } = useTranslation();
+  if (!source || typeof source !== "object") return null;
+
+  const {
+    references = 1,
+    title = "",
+    chunks = [],
+    isSnapshot = false,
+    isHistory = false,
+    externalUrl = null,
+  } = source;
+  const safeChunks = Array.isArray(chunks) ? chunks : [];
+  const {
+    isUrl,
+    text: webpageUrl,
+    href: linkTo,
+  } = parseChunkSource({ title, chunks: safeChunks });
+
+  const safeParsedHref = isUrl ? sanitizeHttpUrl(linkTo) : null;
+  const safeDirectHref =
+    safeParsedHref ||
+    sanitizeHttpUrl(externalUrl) ||
+    sanitizeHttpUrl(safeChunks[0]?.chunkSource);
+  const hasSafeExternalUrl = Boolean(safeDirectHref);
+  const displayUrlText = safeParsedHref
+    ? webpageUrl || safeParsedHref
+    : safeDirectHref;
 
   return (
     <Modal isOpen={!!source} onClose={onClose} size="lg">
       <ModalHeader
         title={
-          isUrl ? (
+          hasSafeExternalUrl ? (
             <a
-              href={linkTo}
+              href={safeDirectHref}
               target="_blank"
               rel="noreferrer"
               className="flex items-center gap-x-1 max-w-full overflow-hidden hover:underline hover:text-blue-300 light:hover:text-blue-600"
             >
-              <span className="truncate" title={webpageUrl}>
-                {truncate(webpageUrl, 45)}
+              <span className="truncate" title={displayUrlText}>
+                {truncate(displayUrlText, 45)}
               </span>
               <ArrowSquareOut className="flex-shrink-0" />
             </a>
           ) : (
-            truncate(title, 45)
+            truncate(title || "Evidence Snapshot", 45)
           )
         }
         subtitle={
           references > 1 ? `Referenced ${references} times.` : undefined
         }
         onClose={onClose}
-      />
-      <ModalBody>
-        {chunks.map(({ text, score }, idx) => (
-          <Fragment key={idx}>
-            <div className="text-zinc-100 light:text-slate-900">
-              <div className="flex flex-col w-full justify-start gap-y-1">
-                <p className="text-zinc-100 light:text-slate-900 whitespace-pre-line">
-                  {HTMLDecode(omitChunkHeader(text))}
-                </p>
-
-                {!!score && (
-                  <div className="w-full flex items-center text-xs text-zinc-400 light:text-slate-500 gap-x-2 cursor-default">
-                    <div
-                      data-tooltip-id="similarity-score"
-                      data-tooltip-content={`This is the semantic similarity score of this chunk of text compared to your query calculated by the vector database.`}
-                      className="flex items-center gap-x-1"
-                    >
-                      <Info size={14} />
-                      <p>
-                        {toPercentString(score)}{" "}
-                        {t("chat_window.similarity_match")}
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-            {idx !== chunks.length - 1 && (
-              <hr className="border-zinc-800 light:border-slate-200" />
+      >
+        {(isHistory || isSnapshot) && (
+          <div className="flex flex-wrap items-center gap-1.5 mt-1">
+            {isHistory && (
+              <span
+                data-testid="citation-modal-history-badge"
+                className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-amber-500/15 text-amber-300 light:bg-amber-100 light:text-amber-800 border border-amber-500/30 light:border-amber-300"
+              >
+                历史上下文
+              </span>
             )}
-          </Fragment>
-        ))}
+            {isSnapshot && (
+              <span
+                data-testid="citation-modal-snapshot-badge"
+                className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-zinc-800 text-zinc-300 light:bg-slate-100 light:text-slate-700 border border-zinc-700 light:border-slate-300"
+              >
+                文本快照
+              </span>
+            )}
+          </div>
+        )}
+      </ModalHeader>
+      <ModalBody>
+        {safeChunks.map(
+          ({ text, score, highlightQuote: chunkHighlightQuote }, idx) => {
+            const decodedText = HTMLDecode(omitChunkHeader(text));
+            const rawTargetQuote =
+              typeof highlightQuote === "string" &&
+              highlightQuote.trim().length > 0
+                ? highlightQuote
+                : typeof chunkHighlightQuote === "string" &&
+                    chunkHighlightQuote.trim().length > 0
+                  ? chunkHighlightQuote
+                  : null;
+            const decodedQuote = rawTargetQuote
+              ? HTMLDecode(rawTargetQuote)
+              : null;
+            const sliced = sliceTextForHighlight(decodedText, decodedQuote);
+
+            return (
+              <Fragment key={idx}>
+                <div className="text-zinc-100 light:text-slate-900">
+                  <div className="flex flex-col w-full justify-start gap-y-1">
+                    <p className="text-zinc-100 light:text-slate-900 whitespace-pre-line">
+                      {sliced.matched ? (
+                        <>
+                          {sliced.before}
+                          <mark
+                            data-testid="citation-highlight-quote"
+                            className="bg-amber-400/30 light:bg-amber-200/90 text-zinc-50 light:text-slate-900 rounded px-0.5"
+                          >
+                            {sliced.match}
+                          </mark>
+                          {sliced.after}
+                        </>
+                      ) : (
+                        sliced.before
+                      )}
+                    </p>
+
+                    {!!score && (
+                      <div className="w-full flex items-center text-xs text-zinc-400 light:text-slate-500 gap-x-2 cursor-default">
+                        <div
+                          data-tooltip-id="similarity-score"
+                          data-tooltip-content={`This is the semantic similarity score of this chunk of text compared to your query calculated by the vector database.`}
+                          className="flex items-center gap-x-1"
+                        >
+                          <Info size={14} />
+                          <p>
+                            {toPercentString(score)}{" "}
+                            {t("chat_window.similarity_match")}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                {idx !== safeChunks.length - 1 && (
+                  <hr className="border-zinc-800 light:border-slate-200" />
+                )}
+              </Fragment>
+            );
+          }
+        )}
       </ModalBody>
     </Modal>
   );

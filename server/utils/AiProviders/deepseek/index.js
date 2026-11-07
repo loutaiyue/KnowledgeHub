@@ -9,6 +9,7 @@ const {
 } = require("../../helpers/chat/responses");
 const {
   temperatureParam,
+  maxTokensParam,
 } = require("../../agents/aibitat/providers/helpers/tooled");
 const {
   modelsDevReasoningCapabilities,
@@ -25,6 +26,10 @@ class DeepSeekLLM {
     this.openai = new OpenAIApi({
       apiKey: process.env.DEEPSEEK_API_KEY,
       baseURL: "https://api.deepseek.com/v1",
+      fetch: globalThis.fetch,
+      defaultHeaders: {
+        Connection: "close",
+      },
     });
     this.model =
       modelPreference || process.env.DEEPSEEK_MODEL_PREF || "deepseek-flash";
@@ -152,20 +157,205 @@ class DeepSeekLLM {
     };
   }
 
+  #hasBalancedJsonEnvelope(rawContent = "") {
+    if (typeof rawContent !== "string") return false;
+    let trimmed = rawContent.trim();
+    if (!trimmed) return false;
+
+    if (trimmed.startsWith("```")) {
+      const openMatch = trimmed.match(/^```(?:json)?(?:[ \t]*\r?\n|[ \t]+)/i);
+      if (
+        !openMatch ||
+        !trimmed.endsWith("```") ||
+        trimmed.length <= openMatch[0].length + 3
+      ) {
+        return false;
+      }
+      trimmed = trimmed.slice(openMatch[0].length, -3).trim();
+    }
+
+    if (
+      trimmed.length < 2 ||
+      !trimmed.startsWith("{") ||
+      !trimmed.endsWith("}")
+    ) {
+      return false;
+    }
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < trimmed.length; i++) {
+      const ch = trimmed[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') inString = true;
+      else if (ch === "{") depth += 1;
+      else if (ch === "}") {
+        depth -= 1;
+        if (depth < 0) return false;
+        if (depth === 0 && i !== trimmed.length - 1) return false;
+      }
+    }
+
+    return !inString && !escaped && depth === 0;
+  }
+
+  async #collectStreamCompletion(stream) {
+    let content = "";
+    let reasoningContent = "";
+    let finishReason = null;
+    let hasChoices = false;
+    const usage = {
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+    };
+
+    try {
+      for await (const chunk of stream) {
+        if (
+          chunk &&
+          Object.prototype.hasOwnProperty.call(chunk, "usage") &&
+          !!chunk.usage &&
+          Object.values(chunk.usage).length > 0
+        ) {
+          if (
+            Object.prototype.hasOwnProperty.call(chunk.usage, "prompt_tokens")
+          ) {
+            usage.prompt_tokens = Number(chunk.usage.prompt_tokens) || 0;
+          }
+          if (
+            Object.prototype.hasOwnProperty.call(
+              chunk.usage,
+              "completion_tokens"
+            )
+          ) {
+            usage.completion_tokens =
+              Number(chunk.usage.completion_tokens) || 0;
+          }
+          if (
+            Object.prototype.hasOwnProperty.call(chunk.usage, "total_tokens")
+          ) {
+            usage.total_tokens = Number(chunk.usage.total_tokens) || 0;
+          } else {
+            usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+          }
+        }
+
+        const choice = chunk?.choices?.[0];
+        if (!choice) continue;
+        hasChoices = true;
+
+        const delta = choice.delta;
+        const reasoningToken =
+          typeof delta?.reasoning_content === "string"
+            ? delta.reasoning_content
+            : typeof delta?.reasoning === "string"
+              ? delta.reasoning
+              : "";
+        if (reasoningToken) {
+          reasoningContent += reasoningToken;
+        }
+        if (typeof delta?.content === "string" && delta.content.length > 0) {
+          content += delta.content;
+        }
+
+        if (
+          Object.prototype.hasOwnProperty.call(choice, "finish_reason") &&
+          choice.finish_reason !== "" &&
+          choice.finish_reason !== null
+        ) {
+          finishReason = choice.finish_reason;
+        }
+      }
+    } catch (e) {
+      const hasCompleteJsonEnvelope = this.#hasBalancedJsonEnvelope(content);
+      if (finishReason === null && !hasCompleteJsonEnvelope) {
+        if (e && typeof e === "object") {
+          e.partialRawText = reasoningContent
+            ? `<think>${reasoningContent}</think>${content}`
+            : content;
+        }
+        throw e;
+      }
+    }
+
+    if (!hasChoices) return {};
+
+    return {
+      choices: [
+        {
+          message: {
+            content,
+            ...(reasoningContent
+              ? { reasoning_content: reasoningContent }
+              : {}),
+          },
+          finish_reason: finishReason,
+        },
+      ],
+      usage,
+    };
+  }
+
   async getChatCompletion(
     messages = null,
-    { temperature = this.temperature, reasoningEffort = null } = {}
+    {
+      temperature = this.temperature,
+      reasoningEffort = null,
+      maxTokens = null,
+    } = {}
   ) {
+    const effectiveReasoningEffort =
+      reasoningEffort ??
+      (maxTokens !== null &&
+      modelsDevReasoningCapabilities(
+        "deepseek",
+        this.model
+      ).reasoningOptions.includes("off")
+        ? "off"
+        : null);
     const result = await LLMPerformanceMonitor.measureAsyncFunction(
       this.openai.chat.completions
         .create({
           model: this.model,
+          stream: true,
           messages,
           ...temperatureParam(temperature),
-          ...reasoningParams("deepseek", reasoningEffort, this.model),
+          ...reasoningParams("deepseek", effectiveReasoningEffort, this.model),
+          ...maxTokensParam(maxTokens),
+        })
+        .then(async (response) => {
+          if (
+            response &&
+            typeof response[Symbol.asyncIterator] === "function"
+          ) {
+            return await this.#collectStreamCompletion(response);
+          }
+          return response;
         })
         .catch((e) => {
-          throw new Error(e.message);
+          if (e instanceof Error) {
+            if (
+              e.name === "Error" &&
+              typeof e.constructor?.name === "string" &&
+              e.constructor.name !== "Error"
+            ) {
+              e.name = e.constructor.name;
+            }
+            throw e;
+          }
+          const err = new Error(e?.message ?? String(e));
+          if (typeof e?.name === "string" && e.name) err.name = e.name;
+          if (e?.status !== undefined) err.status = e.status;
+          if (e?.code !== undefined) err.code = e.code;
+          if (e?.cause !== undefined) err.cause = e.cause;
+          throw err;
         })
     );
 
@@ -180,10 +370,11 @@ class DeepSeekLLM {
     return {
       textResponse: this.#parseReasoningFromResponse(result.output.choices[0]),
       metrics: {
-        prompt_tokens: result.output.usage.prompt_tokens || 0,
-        completion_tokens: result.output.usage.completion_tokens || 0,
-        total_tokens: result.output.usage.total_tokens || 0,
-        outputTps: result.output.usage.completion_tokens / result.duration,
+        prompt_tokens: result.output.usage?.prompt_tokens || 0,
+        completion_tokens: result.output.usage?.completion_tokens || 0,
+        total_tokens: result.output.usage?.total_tokens || 0,
+        outputTps:
+          (result.output.usage?.completion_tokens || 0) / result.duration,
         duration: result.duration,
         model: this.model,
         provider: this.className,

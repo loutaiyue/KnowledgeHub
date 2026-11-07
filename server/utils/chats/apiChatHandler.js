@@ -5,9 +5,13 @@ const { getVectorDbClass, resolveProviderConnector } = require("../helpers");
 const { addChatCostToMetrics } = require("../helpers/modelPricing");
 const { writeResponseChunk } = require("../helpers/chat/responses");
 const { abortConnectorOnClientDisconnect } = require("../helpers/abortSignals");
+const answerVerification = require("./answerVerification");
+const {
+  collectPinnedDocIdentifiers,
+  buildAndDeriveEvidence,
+} = require("./evidence");
 const {
   chatPrompt,
-  sourceIdentifier,
   recentChatHistory,
   grepAllSlashCommands,
 } = require("./index");
@@ -150,6 +154,7 @@ async function chatSync({
   attachments = [],
   reset = false,
 }) {
+  const originalQuestion = message;
   const uuid = uuidv4();
   const chatMode = mode ?? workspace?.chatMode ?? "automatic";
 
@@ -310,9 +315,6 @@ async function chatSync({
   // If we are here we know that we are in a workspace that is:
   // 1. Chatting in "chat" mode and may or may _not_ have embeddings
   // 2. Chatting in "query" mode and has at least 1 embedding
-  let contextTexts = [];
-  let sources = [];
-  let pinnedDocIdentifiers = [];
   const { rawHistory, chatHistory } = await recentChatHistory({
     user,
     workspace,
@@ -321,36 +323,11 @@ async function chatSync({
     apiSessionId: sessionId,
   });
 
-  await new DocumentManager({
+  const pinnedDocs = await new DocumentManager({
     workspace,
     maxTokens: LLMConnector.promptWindowLimit(),
-  })
-    .pinnedDocs()
-    .then((pinnedDocs) => {
-      pinnedDocs.forEach((doc) => {
-        const { pageContent, ...metadata } = doc;
-        pinnedDocIdentifiers.push(sourceIdentifier(doc));
-        contextTexts.push(doc.pageContent);
-        sources.push({
-          text:
-            pageContent.slice(0, 1_000) +
-            "...continued on in source document...",
-          ...metadata,
-        });
-      });
-    });
-
-  parsedDocuments.forEach((doc) => {
-    if (doc.pageContent) {
-      contextTexts.push(doc.pageContent);
-      const { pageContent, ...metadata } = doc;
-      sources.push({
-        text:
-          pageContent.slice(0, 1_000) + "...continued on in source document...",
-        ...metadata,
-      });
-    }
-  });
+  }).pinnedDocs();
+  const pinnedDocIdentifiers = collectPinnedDocIdentifiers(pinnedDocs);
 
   const vectorSearchResults =
     embeddingsCount !== 0
@@ -397,8 +374,12 @@ async function chatSync({
   // If a past citation was used to answer the question - that is visible in the history so it logically makes sense
   // and does not appear to the user that a new response used information that is otherwise irrelevant for a given prompt.
   // TLDR; reduces GitHub issues for "LLM citing document that has no answer in it" while keep answers highly accurate.
-  contextTexts = [...contextTexts, ...filledSources.contextTexts];
-  sources = [...sources, ...vectorSearchResults.sources];
+  const { evidenceItems, contextTexts, sources } = buildAndDeriveEvidence({
+    pinnedDocs,
+    parsedDocuments,
+    retrievalSources: vectorSearchResults.sources,
+    filledSources,
+  });
 
   // If in query mode and no context chunks are found from search, backfill, or pins -  do not
   // let the LLM try to hallucinate a response or use general knowledge and exit early
@@ -474,6 +455,19 @@ async function chatSync({
     };
   }
 
+  const verification =
+    process.env.RAG_ANSWER_VERIFICATION_ENABLED === "true"
+      ? await verifySyncAnswer({
+          connector: LLMConnector,
+          question: originalQuestion,
+          answer: textResponse,
+          contextTexts,
+          evidenceItems,
+          generationMessages: messages,
+          systemPrompt,
+        })
+      : undefined;
+
   const { chat } = await WorkspaceChats.new({
     workspaceId: workspace.id,
     prompt: message,
@@ -498,7 +492,14 @@ async function chatSync({
     textResponse,
     sources,
     metrics: performanceMetrics,
+    ...(verification ? { verification } : {}),
   };
+}
+
+// Deliberately scoped to the developer API's non-agent synchronous response.
+// Do not persist the assessment or alter the answer, sources, or generation metrics.
+async function verifySyncAnswer(options = {}) {
+  return answerVerification.runChatAnswerVerification(options);
 }
 
 /**
@@ -695,9 +696,6 @@ async function streamChat({
   // 2. Chatting in "query" mode and has at least 1 embedding
   let completeText;
   let metrics = {};
-  let contextTexts = [];
-  let sources = [];
-  let pinnedDocIdentifiers = [];
   const { rawHistory, chatHistory } = await recentChatHistory({
     user,
     workspace,
@@ -712,36 +710,11 @@ async function streamChat({
   // it will undergo prompt compression anyway to make it work. If there is so much pinned that the context here is bigger than
   // what the model can support - it would get compressed anyway and that really is not the point of pinning. It is really best
   // suited for high-context models.
-  await new DocumentManager({
+  const pinnedDocs = await new DocumentManager({
     workspace,
     maxTokens: LLMConnector.promptWindowLimit(),
-  })
-    .pinnedDocs()
-    .then((pinnedDocs) => {
-      pinnedDocs.forEach((doc) => {
-        const { pageContent, ...metadata } = doc;
-        pinnedDocIdentifiers.push(sourceIdentifier(doc));
-        contextTexts.push(doc.pageContent);
-        sources.push({
-          text:
-            pageContent.slice(0, 1_000) +
-            "...continued on in source document...",
-          ...metadata,
-        });
-      });
-    });
-
-  parsedDocuments.forEach((doc) => {
-    if (doc.pageContent) {
-      contextTexts.push(doc.pageContent);
-      const { pageContent, ...metadata } = doc;
-      sources.push({
-        text:
-          pageContent.slice(0, 1_000) + "...continued on in source document...",
-        ...metadata,
-      });
-    }
-  });
+  }).pinnedDocs();
+  const pinnedDocIdentifiers = collectPinnedDocIdentifiers(pinnedDocs);
 
   const vectorSearchResults =
     embeddingsCount !== 0
@@ -789,8 +762,12 @@ async function streamChat({
   // If a past citation was used to answer the question - that is visible in the history so it logically makes sense
   // and does not appear to the user that a new response used information that is otherwise irrelevant for a given prompt.
   // TLDR; reduces GitHub issues for "LLM citing document that has no answer in it" while keep answers highly accurate.
-  contextTexts = [...contextTexts, ...filledSources.contextTexts];
-  sources = [...sources, ...vectorSearchResults.sources];
+  const { contextTexts, sources } = buildAndDeriveEvidence({
+    pinnedDocs,
+    parsedDocuments,
+    retrievalSources: vectorSearchResults.sources,
+    filledSources,
+  });
 
   // If in query mode and no context chunks are found from search, backfill, or pins -  do not
   // let the LLM try to hallucinate a response or use general knowledge and exit early

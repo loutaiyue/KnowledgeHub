@@ -236,6 +236,7 @@ function convertToChatHistory(history = []) {
         ...(data?.clarifyingQuestions?.length > 0
           ? { clarifyingQuestions: data.clarifyingQuestions }
           : {}),
+        ...(data?.verification ? { verification: data.verification } : {}),
       },
     ]);
   }

@@ -34,6 +34,9 @@ jest.mock("../../../models/telemetry", () => ({
     sendTelemetry: jest.fn(),
   },
 }));
+jest.mock("../../../utils/helpers/modelPricing", () => ({
+  addChatCostToMetrics: jest.fn((metrics) => metrics),
+}));
 jest.mock("../../../utils/chats/index", () => ({
   chatPrompt: jest.fn(),
   sourceIdentifier: jest.fn(),
@@ -122,6 +125,428 @@ const agentResult = {
  * send into chatSync/streamChat. If an endpoint ever adds a new combination
  * it belongs in this table.
  */
+describe("chatSync answer verification", () => {
+  const verifier = require("../../../utils/chats/answerVerification");
+  const { DocumentManager } = require("../../../utils/DocumentManager");
+  const chats = require("../../../utils/chats/index");
+  const savedEnv = process.env.RAG_ANSWER_VERIFICATION_ENABLED;
+  let connector;
+  let vectorDb;
+  let verifySpy;
+  const sources = [
+    { id: "chunk1", title: "report", text: "Revenue rose 12%." },
+  ];
+  const metrics = { prompt_tokens: 23, completion_tokens: 8, total_tokens: 31 };
+  const assessment = (verdict = "supported", mixed = false) =>
+    JSON.stringify({
+      summary: "Assessment",
+      claims: [
+        {
+          claim: "Revenue rose 12%.",
+          answerQuote: "Revenue rose 12%.",
+          verdict,
+          evidence:
+            verdict === "supported"
+              ? [{ evidenceId: "ev-0", quote: sources[0].text }]
+              : [],
+        },
+        ...(mixed
+          ? [
+              {
+                claim: "Profit doubled.",
+                answerQuote: "Profit doubled.",
+                verdict: "unsupported",
+                evidence: [],
+              },
+            ]
+          : []),
+      ],
+    });
+  const invoke = () =>
+    ApiChatHandler.chatSync({
+      workspace,
+      message: "Original question",
+      mode: "chat",
+    });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.RAG_ANSWER_VERIFICATION_ENABLED = "true";
+    verifySpy = jest.spyOn(verifier, "verifyAnswer");
+    EphemeralAgentHandler.isAgentInvocation.mockResolvedValue(false);
+    WorkspaceChats.new.mockResolvedValue({ chat: { id: 123 } });
+    chats.grepAllSlashCommands.mockImplementation(
+      async () => "Expanded question"
+    );
+    chats.chatPrompt.mockResolvedValue("Workspace instructions");
+    chats.recentChatHistory.mockResolvedValue({
+      rawHistory: [],
+      chatHistory: [],
+    });
+    DocumentManager.mockImplementation(() => ({ pinnedDocs: async () => [] }));
+    connector = {
+      className: "GenericOpenAiLLM",
+      model: "gpt-4",
+      maxTokens: 1024,
+      promptWindowLimit: jest.fn(() => 8192),
+      constructPrompt: jest.fn(({ systemPrompt, contextTexts }) => [
+        {
+          role: "system",
+          content: systemPrompt + JSON.stringify(contextTexts),
+        },
+      ]),
+      compressMessages: jest.fn(async (args) =>
+        connector.constructPrompt(args)
+      ),
+      getChatCompletion: jest
+        .fn()
+        .mockResolvedValueOnce({ textResponse: "Revenue rose 12%.", metrics })
+        .mockResolvedValue({
+          textResponse: assessment(),
+          metrics: { total_tokens: 999 },
+        }),
+    };
+    resolveProviderConnector.mockResolvedValue({
+      connector,
+      routingMetadata: null,
+    });
+    vectorDb = {
+      hasNamespace: jest.fn().mockResolvedValue(true),
+      namespaceCount: jest.fn().mockResolvedValue(1),
+      performSimilaritySearch: jest.fn().mockResolvedValue({
+        contextTexts: [sources[0].text],
+        sources,
+        message: null,
+      }),
+    };
+    getVectorDbClass.mockReturnValue(vectorDb);
+  });
+  afterEach(() => {
+    jest.restoreAllMocks();
+    jest.useRealTimers();
+    chats.grepAllSlashCommands.mockImplementation(async (message) => message);
+    if (savedEnv === undefined)
+      delete process.env.RAG_ANSWER_VERIFICATION_ENABLED;
+    else process.env.RAG_ANSWER_VERIFICATION_ENABLED = savedEnv;
+  });
+
+  test.each([undefined, "false", "TRUE", "1"])(
+    "flag %s preserves the original response exactly",
+    async (flag) => {
+      if (flag === undefined)
+        delete process.env.RAG_ANSWER_VERIFICATION_ENABLED;
+      else process.env.RAG_ANSWER_VERIFICATION_ENABLED = flag;
+      expect(await invoke()).toEqual({
+        id: expect.any(String),
+        type: "textResponse",
+        close: true,
+        error: null,
+        chatId: 123,
+        textResponse: "Revenue rose 12%.",
+        sources,
+        metrics,
+      });
+      expect(verifySpy).not.toHaveBeenCalled();
+      expect(connector.getChatCompletion).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  test.each([
+    ["supported", "supported", false],
+    ["partially_supported", "supported", true],
+    ["unsupported", "unsupported", false],
+  ])(
+    "returns %s without altering answer, sources, metrics or persistence",
+    async (status, verdict, mixed) => {
+      connector.getChatCompletion.mockResolvedValue({
+        textResponse: assessment(verdict, mixed),
+      });
+      const result = await invoke();
+      expect(result).toMatchObject({
+        textResponse: "Revenue rose 12%.",
+        sources,
+        metrics,
+        verification: {
+          status,
+          verificationScope: "model_extracted_claims_only",
+        },
+      });
+      const [messages, options] = connector.getChatCompletion.mock.calls[1];
+      expect(messages).toHaveLength(2);
+      expect(messages.map((m) => m.role)).toEqual(["system", "user"]);
+      expect(JSON.parse(messages[1].content)).toEqual({
+        question: "Original question",
+        answer: "Revenue rose 12%.",
+        evidence: [{ evidenceId: "ev-0", text: sources[0].text }],
+      });
+      expect(options).toEqual({ temperature: 0 });
+      expect(connector.compressMessages).toHaveBeenCalledTimes(1);
+      expect(WorkspaceChats.new.mock.calls[0][0].response).toEqual({
+        text: "Revenue rose 12%.",
+        sources,
+        attachments: [],
+        type: "chat",
+        metrics,
+      });
+    }
+  );
+
+  test("provider failure retains original answer and returns a safe error", async () => {
+    connector.getChatCompletion.mockRejectedValue(
+      new Error("secret provider response")
+    );
+    const result = await invoke();
+    expect(result.textResponse).toBe("Revenue rose 12%.");
+    expect(result.verification).toMatchObject({
+      status: "verification_error",
+      error: { code: "EVALUATION_FAILED" },
+    });
+    expect(JSON.stringify(result)).not.toContain("secret");
+  });
+
+  test("no contexts skips the evaluator", async () => {
+    vectorDb.namespaceCount.mockResolvedValue(0);
+    const result = await invoke();
+    expect(result.verification.status).toBe("skipped");
+    expect(connector.getChatCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  test("empty generation skips verification", async () => {
+    connector.getChatCompletion
+      .mockReset()
+      .mockResolvedValue({ textResponse: "", metrics });
+    expect((await invoke()).type).toBe("abort");
+    expect(verifySpy).not.toHaveBeenCalled();
+    expect(connector.getChatCompletion).toHaveBeenCalledTimes(1);
+  });
+
+  test("generation rejection skips verification", async () => {
+    connector.getChatCompletion
+      .mockReset()
+      .mockRejectedValue(new Error("generation failed"));
+    await expect(invoke()).rejects.toThrow("generation failed");
+    expect(verifySpy).not.toHaveBeenCalled();
+  });
+
+  test("agent diversion never invokes verifier", async () => {
+    EphemeralAgentHandler.isAgentInvocation.mockResolvedValue(true);
+    ephemeralMocks.waitForClose.mockResolvedValue(agentResult);
+    expect((await invoke()).verification).toBeUndefined();
+    expect(verifySpy).not.toHaveBeenCalled();
+    expect(connector.getChatCompletion).not.toHaveBeenCalled();
+  });
+
+  test("supports DeepSeekLLM with explicit maxTokens: 4096 and reasoning output", async () => {
+    connector.className = "DeepSeekLLM";
+    connector.model = "deepseek-reasoner";
+    delete connector.maxTokens;
+    connector.getChatCompletion
+      .mockReset()
+      .mockResolvedValueOnce({
+        textResponse: "<think>Analyzing revenue report...</think>Revenue rose 12%.",
+        metrics,
+      })
+      .mockResolvedValueOnce({
+        textResponse: `<think>Validating claim against ev-0...</think>${assessment()}`,
+        metrics: { total_tokens: 999 },
+      });
+
+    const result = await invoke();
+    expect(result).toMatchObject({
+      textResponse: "<think>Analyzing revenue report...</think>Revenue rose 12%.",
+      sources,
+      metrics,
+      verification: {
+        status: "supported",
+        verificationScope: "model_extracted_claims_only",
+        claims: [
+          expect.objectContaining({
+            claim: "Revenue rose 12%.",
+            answerQuote: "Revenue rose 12%.",
+            answerLocation: {
+              status: "located",
+              ranges: [{ start: 0, end: 17 }],
+            },
+            verdict: "supported",
+          }),
+        ],
+      },
+    });
+    const [, options] = connector.getChatCompletion.mock.calls[1];
+    expect(options).toEqual({ temperature: 0, maxTokens: 4096 });
+  });
+
+  test.each([
+    [
+      "evaluation_output_budget_unavailable",
+      (c) => {
+        c.maxTokens = undefined;
+      },
+    ],
+    [
+      "evaluation_provider_unsupported",
+      (c) => {
+        c.className = "AnthropicLLM";
+      },
+    ],
+  ])(
+    "skips with skipReason %s without a second model call when provider capabilities are not satisfied",
+    async (skipReason, setup) => {
+      setup(connector);
+      const result = await invoke();
+      expect(result.textResponse).toBe("Revenue rose 12%.");
+      expect(result.verification).toMatchObject({
+        status: "skipped",
+        verificationScope: "model_extracted_claims_only",
+        reason: skipReason,
+        skipReason,
+      });
+      expect(connector.getChatCompletion).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  test.each([
+    [
+      "evaluation_context_too_large",
+      (c) => c.promptWindowLimit.mockReturnValue(1024),
+    ],
+    [
+      "evaluation_context_not_preserved",
+      (c) =>
+        c.compressMessages.mockResolvedValue([
+          { role: "system", content: "compressed" },
+        ]),
+    ],
+  ])(
+    "fails closed with %s without a second model call",
+    async (code, setup) => {
+      setup(connector);
+      const result = await invoke();
+      expect(result.textResponse).toBe("Revenue rose 12%.");
+      expect(result.verification).toMatchObject({
+        status: "verification_error",
+        error: { code },
+      });
+      expect(connector.getChatCompletion).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  test("timeout preserves the answer even if the connector ignores cancellation", async () => {
+    jest.useFakeTimers();
+    let finish;
+    connector.getChatCompletion.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        })
+    );
+    const pending = invoke();
+    await jest.advanceTimersByTimeAsync(30_000);
+    const result = await pending;
+    expect(result.textResponse).toBe("Revenue rose 12%.");
+    expect(result.verification.error.code).toBe("EVALUATION_TIMEOUT");
+    finish({ textResponse: assessment() });
+    await Promise.resolve();
+    expect(result.verification.status).toBe("verification_error");
+  });
+
+  test("derives contextTexts and sources from unified evidence across pinned, attachment, retrieval, and history", async () => {
+    const fs = require("fs");
+    const { CollectorApi } = require("../../../utils/collectorApi");
+    jest.spyOn(fs, "existsSync").mockReturnValue(true);
+    jest.spyOn(fs, "writeFileSync").mockImplementation(() => {});
+
+    const pinnedDoc = {
+      id: "pin-1",
+      title: "pinned.md",
+      published: "2026-01-01",
+      pageContent: "Pinned policy: operating margin was 18%.",
+    };
+    const attachedDoc = {
+      id: "att-1",
+      title: "attached.pdf",
+      pageContent: "Attached memo: Q4 bookings grew 9%.",
+    };
+    const historySource = {
+      id: "hist-chunk-1",
+      title: "history.pdf",
+      published: "2026-01-02",
+      text: "Historical note: churn dropped to 2%.",
+      score: 0.82,
+    };
+
+    DocumentManager.mockImplementation(() => ({
+      pinnedDocs: async () => [pinnedDoc],
+    }));
+    chats.sourceIdentifier.mockImplementation(
+      (doc) => `title:${doc.title}-timestamp:${doc.published || "none"}`
+    );
+    chats.recentChatHistory.mockResolvedValue({
+      rawHistory: [
+        {
+          prompt: "Prior turn",
+          response: JSON.stringify({
+            text: "Prior answer",
+            sources: [historySource],
+          }),
+        },
+      ],
+      chatHistory: [],
+    });
+    CollectorApi.mockImplementation(function () {
+      this.online = jest.fn().mockResolvedValue(true);
+      this.parseDocument = jest
+        .fn()
+        .mockResolvedValue({ success: true, documents: [attachedDoc] });
+    });
+
+    const result = await ApiChatHandler.chatSync({
+      workspace,
+      message: "Original question",
+      mode: "chat",
+      attachments: [
+        {
+          name: "attached.pdf",
+          mime: "application/anythingllm-document",
+          contentString: Buffer.from("pdf").toString("base64"),
+        },
+      ],
+    });
+
+    const expectedContextTexts = [
+      pinnedDoc.pageContent,
+      attachedDoc.pageContent,
+      sources[0].text,
+      historySource.text,
+    ];
+    const expectedSources = [
+      {
+        text: `${pinnedDoc.pageContent.slice(0, 1_000)}...continued on in source document...`,
+        id: "pin-1",
+        title: "pinned.md",
+        published: "2026-01-01",
+      },
+      {
+        text: `${attachedDoc.pageContent.slice(0, 1_000)}...continued on in source document...`,
+        id: "att-1",
+        title: "attached.pdf",
+      },
+      sources[0],
+    ];
+
+    expect(connector.compressMessages).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contextTexts: expectedContextTexts,
+      }),
+      expect.any(Array)
+    );
+    expect(result.sources).toEqual(expectedSources);
+    expect(WorkspaceChats.new.mock.calls[0][0].response.sources).toEqual(
+      expectedSources
+    );
+  });
+});
+
 const REAL_WORLD_CASES = [
   {
     name: "workspace chat, no sessionId (POST /v1/workspace/:slug/[stream-]chat)",
