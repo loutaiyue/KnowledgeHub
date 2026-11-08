@@ -6,7 +6,7 @@
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18.12.1-339933.svg)](./package.json)
 [![Built on AnythingLLM](https://img.shields.io/badge/Upstream-Mintplex--Labs%2Fanything--llm-orange.svg)](https://github.com/Mintplex-Labs/anything-llm)
 
-> **项目声明**：**KnowledgeHub** 是基于开源项目 [`Mintplex-Labs/anything-llm`](https://github.com/Mintplex-Labs/anything-llm) 进行二次开发的企业级知识库增强项目（当前开发分支：`feature/rag-answer-verification`）。本项目在保留上游多文档采集、多向量库检索与多模型对话能力的基础上，重点设计并实现了**统一证据链构建（Evidence Pipeline）**、**事实陈述级答案核查（Claim-level Answer Verification）**、**Claim → Evidence 精确子串映射与溯源高亮**以及 **DeepSeek / Generic OpenAI 核查适配器**。
+> **项目声明**：**KnowledgeHub** 是基于开源项目 [`Mintplex-Labs/anything-llm`](https://github.com/Mintplex-Labs/anything-llm) 进行二次开发的企业级知识库增强项目（默认主分支：`main`）。本项目在保留上游多文档采集、多向量库检索与多模型对话能力的基础上，重点设计并实现了**统一证据链构建（Evidence Pipeline）**、**事实陈述级答案核查（Claim-level Answer Verification）**、**Claim → Evidence 精确子串映射与溯源高亮**以及 **DeepSeek / Generic OpenAI 核查适配器**。
 
 ---
 
@@ -50,7 +50,7 @@
 
 ## 2. 核心功能
 
-以下功能均已在当前分支（`feature/rag-answer-verification`）中完整实现并通过自动化测试验证：
+以下功能均已在主分支（`main`）中完整实现并通过自动化测试验证：
 
 1. **多源知识库检索与 AI 问答**
    - 继承 AnythingLLM 的 Workspace 文档管理、向量检索、置顶文档（Pinned Documents）、会话附件解析（Parsed Files）与多轮对话能力。
@@ -87,20 +87,27 @@
 
 ## 3. 项目演示
 
-### 3.1 项目主视觉（上游基础界面）
+### 3.1 知识库回答与事实核查状态摘要栏
+
+在 AI 完成工作区知识库流式问答后，消息底部自动渲染 [`ClaimVerification`](./frontend/src/components/WorkspaceChat/ChatContainer/ChatHistory/ClaimVerification/index.jsx) 核查状态摘要栏（如 `已核查：证据支持 (2/2 条陈述获证据支持)`），不干扰主回答阅读，同时一目了然地呈现整条回答的可信度：
+
+![KnowledgeHub 知识库问答与核查状态摘要栏](./images/screenshots/knowledgehub-summary-banner.png)
+
+### 3.2 ClaimVerification 事实核查展开面板
+
+点击“展开详情”后，面板展示核查范围说明（`核查范围：仅针对模型提取的事实陈述（不改写原始回答）`）、整体核查结论摘要，以及逐条提取出的事实陈述卡片（含单条判定徽章 `证据支持`、可点击定位的 `回答原文片段`、来源类型徽章 `检索片段` / `文本快照`、关联证据引文预览与 `查看证据` 入口）：
+
+![KnowledgeHub ClaimVerification 事实核查展开面板](./images/screenshots/knowledgehub-claim-panel.jpg)
+
+### 3.3 CitationDetailModal 证据原文高亮弹窗
+
+点击任一证据卡片右侧的“查看证据”后，弹出 [`CitationDetailModal`](./frontend/src/components/WorkspaceChat/ChatContainer/ChatHistory/Citation/index.jsx) 模态框，展示文档标题、来源/快照标识（如 `文本快照`），并将支撑该条事实陈述的精确原文片段以黄色 `<mark>` 高亮显示：
+
+![KnowledgeHub CitationDetailModal 证据原文高亮弹窗](./images/screenshots/knowledgehub-evidence-highlight.jpg)
+
+### 3.4 上游基础工作区概览
 
 ![AnythingLLM Base Interface](./images/promo.png)
-
-### 3.2 KnowledgeHub 核心交互演示（截图占位说明）
-
-> **说明**：仓库当前未内置 KnowledgeHub 事实核查面板的静态截图文件。为保证文档真实性，此处不引用虚构图片路径。启动项目并开启 `RAG_ANSWER_VERIFICATION_ENABLED="true"` 后，可在工作区对话界面体验并补充以下三类核心视图截图：
-
-1. **普通知识库回答与核查状态摘要栏（占位：`docs/screenshots/knowledgehub-summary-banner.png`）**
-   - **展示内容**：AI 流式生成回答正文下方、底部 Citations 引用栏上方展示 [`ClaimVerification`](./frontend/src/components/WorkspaceChat/ChatContainer/ChatHistory/ClaimVerification/index.jsx) 摘要条，包含状态徽章（如 `已核实` / `部分支持` / `存疑`）、计数统计 pill（`支持 X` / `存疑 Y` / `缺乏依据 Z`）以及固定范围声明 `核查范围：仅针对模型提取的事实陈述（不改写原始回答）`。
-2. **ClaimVerification 事实核查展开面板（占位：`docs/screenshots/knowledgehub-claim-panel.png`）**
-   - **展示内容**：展开核查详情后，逐卡展示提取出的每条事实陈述（`claim`）、单条判定徽章、可点击定位的“回答原文片段”（`answerQuote`）、判定说明（`reason`）以及关联的证据卡片列表（含文档标题、`检索片段` / `置顶文档` / `对话附件` / `历史上下文` 来源徽章、`文本快照` 标识及证据引文预览）。
-3. **CitationDetailModal 证据原文高亮弹窗（占位：`docs/screenshots/knowledgehub-evidence-highlight.png`）**
-   - **展示内容**：点击证据卡片上的“查看证据”后弹出的模态框，头部显示来源类型徽章与 `已高亮核查命中片段` 提示，正文中将支撑该 Claim 的精确子串以黄色高亮框（`<mark>`）标记并自动居中滚动定位。
 
 ---
 
