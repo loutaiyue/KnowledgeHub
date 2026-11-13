@@ -1,5 +1,8 @@
 const createFilesLib = require("../lib.js");
 const { applyBranding } = require("./utils.js");
+const { embedMarkdownImages } = require("../images.js");
+
+const PDF_IMAGE_FORMATS = ["png", "jpg", "gif", "webp"];
 
 module.exports.CreatePdfFile = {
   name: "create-pdf-file",
@@ -91,7 +94,12 @@ module.exports.CreatePdfFile = {
                 "pdf-lib"
               );
 
-              const rawBuffer = await markdownToPdf(content);
+              const markdown = await embedMarkdownImages(content, {
+                formats: PDF_IMAGE_FORMATS,
+                log: (msg) =>
+                  this.super.handlerProps.log(`create-pdf-file: ${msg}`),
+              });
+              const rawBuffer = await markdownToPdf(markdown);
               const pdfDoc = await PDFDocument.load(rawBuffer);
               await applyBranding(pdfDoc, { rgb, StandardFonts });
 
