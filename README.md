@@ -3,7 +3,7 @@
 **基于证据追溯与事实陈述级核查的企业级 RAG 知识库系统**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18.12.1-339933.svg)](./package.json)
+[![Node.js](https://img.shields.io/badge/Node.js-24_LTS-339933.svg)](./.nvmrc)
 [![Built on AnythingLLM](https://img.shields.io/badge/Upstream-Mintplex--Labs%2Fanything--llm-orange.svg)](https://github.com/Mintplex-Labs/anything-llm)
 
 > **项目声明**：**KnowledgeHub** 是基于开源项目 [`Mintplex-Labs/anything-llm`](https://github.com/Mintplex-Labs/anything-llm) 进行二次开发的企业级知识库增强项目（默认主分支：`main`）。本项目在保留上游多文档采集、多向量库检索与多模型对话能力的基础上，重点设计并实现了**统一证据链构建（Evidence Pipeline）**、**事实陈述级答案核查（Claim-level Answer Verification）**、**Claim → Evidence 精确子串映射与溯源高亮**以及 **DeepSeek / Generic OpenAI 核查适配器**。
@@ -324,8 +324,8 @@ sequenceDiagram
 以下命令与版本要求均直接依据根目录 [`package.json`](./package.json)、[`server/package.json`](./server/package.json)、[`frontend/package.json`](./frontend/package.json)、[`collector/package.json`](./collector/package.json) 与 [`server/.env.example`](./server/.env.example) 核实。
 
 ### 8.1 环境要求
-- **Node.js**：`>= 18.12.1`（`server` 与 `collector` 要求 `>=18.12.1`，`frontend` 要求 `>=18`）
-- **Yarn**：`1.x`（Classic Yarn，用于执行根目录工作区脚本）
+- **Node.js**：`24.x` LTS，具体版本见 [`.nvmrc`](./.nvmrc)，与 CI 和 Docker 构建保持一致。
+- **Yarn**：`1.22.22`（Classic Yarn，版本固定在根目录 `packageManager` 字段）。
 
 ### 8.2 安装依赖与初始化环境
 在项目根目录下执行：
@@ -465,3 +465,5 @@ yarn test
 
 ### 11.2 开源协议
 本项目继续遵循上游项目的 **MIT License**。完整的版权声明与许可条款请参见根目录下的 [`LICENSE`](./LICENSE) 文件（`Copyright (c) Mintplex Labs Inc.`）。
+
+维护流程、CI 检查、主分支保护、版本发布与上游补丁记录见 [`MAINTENANCE.md`](./MAINTENANCE.md)。

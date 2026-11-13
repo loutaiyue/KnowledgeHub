@@ -8,14 +8,15 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mintplex-labs/anything-llm.git"
+    "url": "git+https://github.com/loutaiyue/KnowledgeHub.git"
   },
   "bugs": {
-    "url": "https://github.com/mintplex-labs/anything-llm/issues"
+    "url": "https://github.com/loutaiyue/KnowledgeHub/issues"
   },
-  "homepage": "https://github.com/mintplex-labs/anything-llm#readme",
+  "homepage": "https://github.com/loutaiyue/KnowledgeHub#readme",
+  "packageManager": "yarn@1.22.22",
   "engines": {
-    "node": ">=18"
+    "node": ">=24"
   },
   "scripts": {
     "test": "jest",
